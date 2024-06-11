@@ -535,7 +535,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(rust_analyzer)))]
 mod ptest {
     use super::*;
     use comptime::comptime;
