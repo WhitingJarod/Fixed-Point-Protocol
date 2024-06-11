@@ -10,16 +10,6 @@ mod doubles {
     pub const EXP_BIAS: i64 = (1 << (EXP_DIGITS - 1)) - 1;
 }
 
-#[cfg(debug_assertions)]
-fn print_binary(bits: u64) {
-    let bytes = bits.to_be_bytes();
-    let mut output = String::new();
-    for byte in bytes.iter() {
-        output.push_str(&format!("{:08b} ", byte));
-    }
-    println!("{}", output);
-}
-
 // P is the number of decimal places
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FixedPoint<const P: u8>(isize);
@@ -98,8 +88,21 @@ impl<const P: u8> FixedPoint<P> {
         if exp > 0 {
             val |= 1 << doubles::MANTISSA_DIGITS;
         }
+
+        let sham = doubles::MANTISSA_DIGITS as i64 - exp_val - P as i64;
         #[cfg(debug_assertions)]
-        val = if (val.overflowing_shr(doubles::MANTISSA_DIGITS as i64 - exp_val - P as i64);
+        {
+            val = if sham < 0 {
+                val.overflowing_shl((-sham) as u32).0
+            } else {
+                val.overflowing_shr(sham as u32).0
+            };
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            val >>= sham;
+        }
+
         let mut val = val as isize;
         if sign {
             val = -val;
@@ -108,28 +111,154 @@ impl<const P: u8> FixedPoint<P> {
     }
 }
 
-impl<const P: u8> From<isize> for FixedPoint<P> {
-    fn from(mut value: isize) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            if P >= isize::BITS as u8 {
-                panic!(
-                    "Too many decimal places for FixedPoint. Maximum is {}.",
-                    isize::BITS - 1
-                );
+#[cfg(debug_assertions)]
+macro_rules! format_thousands {
+    ($num:expr) => {{
+        let s = $num.to_string();
+        let mut stream = s.chars().rev().peekable();
+        let mut output = String::new();
+        let mut i = -1;
+        while let Some(c) = stream.peek() {
+            i += 1;
+            if i == 3 && c != &'-' {
+                i = 0;
+                output.push(',');
             }
-            if value.abs() > isize::MAX >> P {
-                panic!("Value is too large to fit in FixedPoint.");
+            output.push(stream.next().unwrap());
+        }
+        output.chars().rev().collect::<String>()
+    }};
+}
+#[cfg(debug_assertions)]
+macro_rules! panic_numbers {
+    ($fmt:literal $(, $name:ident=$num:expr)*) => {{
+        $(
+            let $name: String = format_thousands!($num);
+        )*
+        let strs = [$(&$name),*];
+        let width = strs.iter().fold(0, |a, b| b.len().max(a));
+        panic!($fmt $(,$name=format!("{: >width$}", $name))*)
+    }};
+}
+#[cfg(debug_assertions)]
+macro_rules! format_numbers {
+    ($fmt:literal $(, $name:ident=$num:expr)*) => {{
+        $(
+            let $name: String = format_thousands!($num);
+        )*
+        let strs = [$(&$name),*];
+        let width = strs.iter().fold(0, |a, b| b.len().max(a));
+        format!($fmt $(,$name=format!("{: >width$}", $name))*)
+    }};
+}
+#[cfg(debug_assertions)]
+macro_rules! panic_message {
+    (too_many_decimals, $p:expr) => {
+        panic_numbers!(
+            "FixedPoint was initialized with too many decimal places for this architecture.\n\t\
+                The maximum allowed is FixedPoint<{a}>\n\t\
+                The value given was    FixedPoint<{b}>",
+            a = isize::BITS - 1,
+            b = $p
+        );
+    };
+    (int_too_big, $p:expr, $value:expr) => {
+        panic_numbers!(
+            "FixedPoint was initialized with a value too large.\n\t\
+                The maximum allowed value is {a}\n\t\
+                The integer provided was     {b}",
+            a = isize::MAX >> P as isize,
+            b = $value
+        );
+    };
+    (int_too_small, $p:expr, $value:expr) => {
+        panic_numbers!(
+            "FixedPoint was initialized with a value too negative.\n\t\
+                The smallest allowed value is {a}\n\t\
+                The integer provided was      {b}",
+            a = -1 - (isize::MAX >> $p as isize),
+            b = $value
+        );
+    };
+}
+
+macro_rules! from_int_impl {
+    ($($t:ty),*) => {
+        $(
+            impl<const P: u8> From<$t> for FixedPoint<P> {
+                fn from(value: $t) -> Self {
+                    let mut value = value as isize;
+                    #[cfg(debug_assertions)]
+                    {
+                        if P >= isize::BITS as u8 {
+                            panic_message!(too_many_decimals, P);
+                        }
+                        if value > isize::MAX >> P as isize {
+                            panic_message!(int_too_big, P, value);
+                        }
+                        if value < -1 - (isize::MAX >> P as isize) {
+                            panic_message!(int_too_small, P, value);
+                        }
+                    }
+                    let sign = value.is_negative();
+                    value <<= P;
+                    if sign {
+                        value |= SIGN_BIT;
+                    }
+                    FixedPoint(value)
+                }
             }
-        }
-        let sign = value.is_negative();
-        value <<= P;
-        if sign {
-            value |= SIGN_BIT;
-        }
-        FixedPoint(value)
+        )*
     }
 }
+macro_rules! from_uint_impl {
+    ($($t:ty),*) => {
+        $(
+            impl<const P: u8> From<$t> for FixedPoint<P> {
+                fn from(value: $t) -> Self {
+                    let mut value = value as usize;
+                    #[cfg(debug_assertions)]
+                    {
+                        if P >= isize::BITS as u8 {
+                            panic_message!(too_many_decimals, P);
+                        }
+                        if value > isize::MAX as usize >> P as usize {
+                            panic_message!(int_too_big, P, value);
+                        }
+                    }
+                    value <<= P;
+                    FixedPoint(value as isize)
+                }
+            }
+        )*
+    }
+}
+
+from_int_impl!(i8, i16, i32, i64, isize);
+from_uint_impl!(u8, u16, u32, u64, usize);
+
+// impl<const P: u8> From<isize> for FixedPoint<P> {
+//     fn from(mut value: isize) -> Self {
+//         #[cfg(debug_assertions)]
+//         {
+//             if P >= isize::BITS as u8 {
+//                 panic!(
+//                     "Too many decimal places for FixedPoint. Maximum is {}.",
+//                     isize::BITS - 1
+//                 );
+//             }
+//             if value.abs() > isize::MAX >> P {
+//                 panic!("Value is too large to fit in FixedPoint.");
+//             }
+//         }
+//         let sign = value.is_negative();
+//         value <<= P;
+//         if sign {
+//             value |= SIGN_BIT;
+//         }
+//         FixedPoint(value)
+//     }
+// }
 
 impl<const P: u8> From<FixedPoint<P>> for f64 {
     fn from(value: FixedPoint<P>) -> f64 {
@@ -214,6 +343,20 @@ impl<const P: u8> Mul for FixedPoint<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constants_check() {
+        // assert that the sign  (1000...000)
+        // xor with the exp mask (0111...000)
+        // and the mantissa mask (0000...111)
+        // should be all ones
+        assert_eq!(
+            (1 << (doubles::MANTISSA_DIGITS + doubles::EXP_DIGITS))
+                ^ doubles::MANTISSA_MASK
+                ^ doubles::EXP_MASK,
+            u64::MAX
+        );
+    }
 
     // #[test]
     // fn print_info() {
@@ -395,13 +538,71 @@ mod tests {
 #[cfg(test)]
 mod ptest {
     use super::*;
+    use comptime::comptime;
     use proptest::prelude::*;
+    use seq_macro::seq;
 
-    proptest! {
+    seq!(P in 0..=52 {
+        const TOLERANCE_~P: f64 = comptime!{2.0_f64.powi(-(P as i32))};
+        const FAIL_TOLERANCE_~P: f64 = comptime!{2.0_f64.powi(-(P as i32 + 1))};
+        const RANGE_~P: f64 = comptime!{2.0_f64.powi(53 - P as i32)};
+        const HALF_RANGE_~P: f64 = comptime!{2.0_f64.powi(52 - P as i32)};
+
+        proptest! {
         #[test]
-        fn f64_conversions(x in -1000.0..1000.0_f64) {
-            let a = FixedPoint::<50>::from_f64(x);
-            assert!((f64::from(a) - x) < 0.0000001);
+            fn f64_conversions_~P(x in -RANGE_~P..RANGE_~P) {
+                let a = FixedPoint::<P>::from_f64(x);
+                assert!((f64::from(a) - x).abs() <= TOLERANCE_~P);
+            }
+
+            #[test]
+            #[should_panic]
+            fn f64_conversions_fail_~P(x in -RANGE_~P..RANGE_~P) {
+                let a = FixedPoint::<P>::from_f64(x);
+                assert!((f64::from(a) - x).abs() <= FAIL_TOLERANCE_~P);
+            }
+
+            #[test]
+            fn f64_additions_test_~P(x in -HALF_RANGE_~P..HALF_RANGE_~P, y in -HALF_RANGE_~P..HALF_RANGE_~P) {
+                let a = FixedPoint::<P>::from_f64(x);
+                let b = FixedPoint::<P>::from_f64(y);
+                let c = a + b;
+                assert!((f64::from(c) - (x + y)).abs() <= 2.0*TOLERANCE_~P);
+            }
+
+            #[test]
+            fn f64_subtractions_test_~P(x in -HALF_RANGE_~P..HALF_RANGE_~P, y in -HALF_RANGE_~P..HALF_RANGE_~P) {
+                let a = FixedPoint::<P>::from_f64(x);
+                let b = FixedPoint::<P>::from_f64(y);
+                let c = a - b;
+                assert!((f64::from(c) - (x - y)).abs() <= 2.0*TOLERANCE_~P);
+            }
+
         }
-    }
+    });
+
+    seq!(P in 0..=63u8 {
+        const INT_RANGE_~P: i64 = i64::MIN >> P;
+
+        proptest! {
+            #[test]
+            fn int_in_range_~P(x in INT_RANGE_~P..(!INT_RANGE_~P)) {
+                let a = FixedPoint::<P>::from(x);
+                let b: FixedPoint<P> = x.into();
+            }
+        }
+    });
+
+    seq!(P in 0..=62u8 {
+        const INT_EXTREME_~P: i64 = i64::MIN >> P;
+        #[test]
+        fn int_too_high_fails_~P() {
+            let a = FixedPoint::<P>::from(INT_EXTREME_~P);
+        }
+
+        #[test]
+        fn int_too_low_fails_~P() {
+            let a = FixedPoint::<P>::from(!INT_EXTREME_~P);
+        }
+    });
 }
